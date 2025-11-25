@@ -33,6 +33,9 @@ export function ChatInterface({
     setInput("");
   };
 
+  const unfilled = placeholders.filter((p) => !p.filled);
+  const showFieldsList = unfilled.length > 0 && conversation.length === 1;
+
   return (
     <div className="chat-container">
       <div className="messages">
@@ -43,6 +46,21 @@ export function ChatInterface({
             <div className="message-content">{msg.content}</div>
           </div>
         ))}
+
+        {showFieldsList && (
+          <div className="message assistant">
+            <span className="role-icon">ðŸ¤– </span>
+            <div className="message-content">
+              <strong>Fields to fill:</strong>
+              <ul className="fields-list">
+                {unfilled.map((p) => (
+                  <li key={p.name}>{p.description || p.name}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+
         {loading && (
           <div className="message assistant">
             <span className="role-icon">ðŸ¤– </span>
