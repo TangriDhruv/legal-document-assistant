@@ -52,3 +52,8 @@ class StatusResponse(BaseModel):
     placeholders: List[Placeholder]
     progress: str = Field(..., description="e.g., '3/7'")
     completed: bool = Field(..., description="All placeholders filled?")
+
+
+class DownloadRequest(BaseModel):
+    """Request for download endpoint"""
+    session_id: str = Field(..., description="Session UUID")

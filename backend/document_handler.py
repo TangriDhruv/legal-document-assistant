@@ -96,15 +96,38 @@ def fill_placeholders(
     """
     doc = Document(docx_path)
     
+    # Helper function to replace text in a paragraph while handling split runs
+    def replace_text_in_paragraph(paragraph, placeholder_name, value):
+        placeholder_text = f"[{placeholder_name}]"
+        
+        # Reconstruct paragraph text to check if placeholder exists
+        full_text = paragraph.text
+        
+        if placeholder_text in full_text:
+            # Handle the replacement by reconstructing runs
+            # This is necessary because placeholders might span multiple runs
+            
+            # Combine all runs' text
+            combined_text = "".join([run.text for run in paragraph.runs])
+            
+            if placeholder_text in combined_text:
+                # Replace the placeholder in combined text
+                new_text = combined_text.replace(placeholder_text, value or "")
+                
+                # Clear existing runs
+                for run in paragraph.runs:
+                    run.text = ""
+                
+                # Add the new text to the first run (or create one if no runs exist)
+                if paragraph.runs:
+                    paragraph.runs[0].text = new_text
+                else:
+                    paragraph.add_run(new_text)
+    
     # Replace in paragraphs
     for paragraph in doc.paragraphs:
         for placeholder_name, value in values.items():
-            placeholder_text = f"[{placeholder_name}]"
-            if placeholder_text in paragraph.text:
-                # Replace in each run while preserving formatting
-                for run in paragraph.runs:
-                    if placeholder_text in run.text:
-                        run.text = run.text.replace(placeholder_text, value or "")
+            replace_text_in_paragraph(paragraph, placeholder_name, value)
     
     # Replace in tables
     for table in doc.tables:
@@ -112,14 +135,7 @@ def fill_placeholders(
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     for placeholder_name, value in values.items():
-                        placeholder_text = f"[{placeholder_name}]"
-                        if placeholder_text in paragraph.text:
-                            for run in paragraph.runs:
-                                if placeholder_text in run.text:
-                                    run.text = run.text.replace(
-                                        placeholder_text, 
-                                        value or ""
-                                    )
+                        replace_text_in_paragraph(paragraph, placeholder_name, value)
     
     # Save completed document
     doc.save(output_path)

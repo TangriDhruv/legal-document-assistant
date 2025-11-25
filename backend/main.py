@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from models import ChatRequest, ChatResponse, UploadResponse, StatusResponse, Placeholder
+from models import ChatRequest, ChatResponse, UploadResponse, StatusResponse, Placeholder, DownloadRequest
 from document_handler import extract_document_text, find_placeholders, fill_placeholders
 from llm_handler import analyze_placeholders, chat_for_placeholders
 from config import settings
@@ -151,13 +151,10 @@ async def chat(request: ChatRequest):
         
         # Update filled values with intelligent matching
         for placeholder_name, value in result.get("filled_values", {}).items():
-            print(f"DEBUG: Processing filled value - Placeholder: '{placeholder_name}' = '{value}'")
-            
             # Try exact match first
             matched = False
             for p in session["placeholders"]:
                 if p["name"].lower().strip() == placeholder_name.lower().strip():
-                    print(f"DEBUG: Exact match found! '{p['name']}' <- '{value}'")
                     session["filled_values"][p["name"]] = value
                     p["filled"] = True
                     p["value"] = value
@@ -213,7 +210,7 @@ async def debug_session(session_id: str):
 
 
 @app.post("/download")
-async def download_document(request: ChatRequest = Body(...)):
+async def download_document(request: DownloadRequest):
     """
     Generate and download completed document
     
@@ -221,7 +218,7 @@ async def download_document(request: ChatRequest = Body(...)):
     Expects session_id in request body
     """
     
-    # Get session_id from request body
+    # Get session_id from request
     actual_session_id = request.session_id
     
     if not actual_session_id or actual_session_id not in sessions:
@@ -232,14 +229,14 @@ async def download_document(request: ChatRequest = Body(...)):
     # Check if all placeholders are filled
     unfilled = [p for p in session["placeholders"] if not p.get("filled")]
     if unfilled:
-        print(f"DEBUG: Cannot download - Unfilled placeholders: {[p['name'] for p in unfilled]}")
+        
         raise HTTPException(
             status_code=400,
             detail=f"Please fill remaining fields: {', '.join(p['name'] for p in unfilled)}"
         )
     
     try:
-        print(f"DEBUG: Generating document with {len(session['filled_values'])} filled values")
+        
         # Generate completed document
         output_path = f"{session['temp_dir']}/completed.docx"
         fill_placeholders(
@@ -248,6 +245,7 @@ async def download_document(request: ChatRequest = Body(...)):
             output_path
         )
         
+        
         return FileResponse(
             output_path,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -255,7 +253,7 @@ async def download_document(request: ChatRequest = Body(...)):
         )
         
     except Exception as e:
-        print(f"DEBUG: Download error - {str(e)}")
+       
         raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
 
 
