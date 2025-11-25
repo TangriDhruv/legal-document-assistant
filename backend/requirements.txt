@@ -3,6 +3,7 @@ uvicorn==0.24.0
 
 # Crucial: Pydantic v1
 pydantic
+pydantic_settings
 
 # Avoid pydantic-settings completely
 # (it forces PyYAML <6 and breaks Python 3.12)
