@@ -1,0 +1,21 @@
+fastapi
+uvicorn==0.24.0
+
+# Crucial: Pydantic v1
+pydantic
+
+# Avoid pydantic-settings completely
+# (it forces PyYAML <6 and breaks Python 3.12)
+# Instead use python-dotenv
+python-dotenv==1.0.0
+
+PyYAML==6.0.1
+python-multipart==0.0.6
+python-docx==0.8.11
+
+openai==1.10.0
+langchain==0.0.350
+langchain-openai==0.0.5
+
+aiohttp==3.9.0
+httpx==0.25.1
