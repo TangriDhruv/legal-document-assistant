@@ -1,4 +1,3 @@
-import React from "react";
 import type { Placeholder } from "../types";
 
 interface PlaceholderListProps {

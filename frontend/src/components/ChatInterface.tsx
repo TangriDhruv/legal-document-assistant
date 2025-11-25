@@ -1,17 +1,20 @@
-import React, { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { Placeholder } from "../types";
 
 interface ChatInterfaceProps {
   conversation: Array<{ role: string; content: string }>;
   onSendMessage: (message: string) => Promise<void>;
   loading: boolean;
+  placeholders?: Placeholder[];
 }
 
 export function ChatInterface({
   conversation,
   onSendMessage,
   loading,
+  placeholders = [],
 }: ChatInterfaceProps) {
-  const [input, setInput] = React.useState("");
+  const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -35,14 +38,14 @@ export function ChatInterface({
       <div className="messages">
         {conversation.map((msg, idx) => (
           <div key={idx} className={`message ${msg.role}`}>
-            {msg.role === "assistant" && <span className="role-icon">🤖 </span>}
-            {msg.role === "user" && <span className="role-icon">👤 </span>}
+            {msg.role === "assistant" && <span className="role-icon">ðŸ¤– </span>}
+            {msg.role === "user" && <span className="role-icon">ðŸ‘¤ </span>}
             <div className="message-content">{msg.content}</div>
           </div>
         ))}
         {loading && (
           <div className="message assistant">
-            <span className="role-icon">🤖 </span>
+            <span className="role-icon">ðŸ¤– </span>
             <div className="message-content typing">
               <span></span><span></span><span></span>
             </div>
