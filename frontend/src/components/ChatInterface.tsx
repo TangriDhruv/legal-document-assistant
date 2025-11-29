@@ -33,56 +33,44 @@ export function ChatInterface({
     setInput("");
   };
 
-  const unfilled = placeholders.filter((p) => !p.filled);
-  const showFieldsList = unfilled.length > 0 && conversation.length === 1;
-
   return (
     <div className="chat-container">
+      {/* Messages */}
       <div className="messages">
         {conversation.map((msg, idx) => (
           <div key={idx} className={`message ${msg.role}`}>
-            {msg.role === "assistant" && <span className="role-icon">ðŸ¤– </span>}
-            {msg.role === "user" && <span className="role-icon">ðŸ‘¤ </span>}
+            <div className="message-icon">
+              {msg.role === "assistant" ? "🤖" : "👤"}
+            </div>
             <div className="message-content">{msg.content}</div>
           </div>
         ))}
 
-        {showFieldsList && (
-          <div className="message assistant">
-            <span className="role-icon">ðŸ¤– </span>
-            <div className="message-content">
-              <strong>Fields to fill:</strong>
-              <ul className="fields-list">
-                {unfilled.map((p) => (
-                  <li key={p.name}>{p.description || p.name}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
-
         {loading && (
           <div className="message assistant">
-            <span className="role-icon">ðŸ¤– </span>
+            <div className="message-icon">🤖</div>
             <div className="message-content typing">
-              <span></span><span></span><span></span>
+              <span></span>
+              <span></span>
+              <span></span>
             </div>
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Input form */}
       <form onSubmit={handleSubmit} className="chat-form">
         <input
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Tell me about the placeholders..."
+          placeholder="Message..."
           disabled={loading}
           className="chat-input"
         />
-        <button type="submit" disabled={loading} className="send-btn">
-          {loading ? "..." : "Send"}
+        <button type="submit" disabled={loading || !input.trim()} className="send-btn">
+          {loading ? "..." : "↑"}
         </button>
       </form>
     </div>

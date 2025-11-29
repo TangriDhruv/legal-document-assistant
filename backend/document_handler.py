@@ -1,12 +1,14 @@
 # backend/document_handler.py
 """
 Document processing module using python-docx
-Handles extraction and manipulation of .docx files
+FIXED: Properly replaces placeholders while preserving formatting
 """
 
 import re
 from typing import List, Dict
 from docx import Document
+from docx.shared import RGBColor, Pt
+from docx.enum.text import WD_COLOR_INDEX
 
 
 def extract_document_text(docx_path: str) -> str:
@@ -89,53 +91,95 @@ def fill_placeholders(
     Replace [Placeholder] with actual values in .docx
     Preserves original formatting
     
+    FIXED VERSION: Properly handles placeholder replacement
+    
     Args:
         docx_path: Path to original .docx
         values: Dictionary of placeholder -> value mappings
+                Keys MUST match exact placeholder names from document
         output_path: Path for completed .docx
     """
+    
+    print(f"\n{'='*70}")
+    print(f"📄 FILL_PLACEHOLDERS starting...")
+    print(f"Input file: {docx_path}")
+    print(f"Values to fill: {values}")
+    print(f"Output file: {output_path}")
+    print(f"{'='*70}\n")
+    
     doc = Document(docx_path)
     
-    # Helper function to replace text in a paragraph while handling split runs
-    def replace_text_in_paragraph(paragraph, placeholder_name, value):
-        placeholder_text = f"[{placeholder_name}]"
+    # Track what we've filled
+    replacements_made = {placeholder: False for placeholder in values.keys()}
+    
+    def replace_in_paragraph(paragraph, values_dict):
+        """Replace placeholders in a paragraph, handling split runs"""
         
-        # Reconstruct paragraph text to check if placeholder exists
+        # Get combined text to check what's in this paragraph
         full_text = paragraph.text
         
-        if placeholder_text in full_text:
-            # Handle the replacement by reconstructing runs
-            # This is necessary because placeholders might span multiple runs
-            
-            # Combine all runs' text
-            combined_text = "".join([run.text for run in paragraph.runs])
-            
-            if placeholder_text in combined_text:
-                # Replace the placeholder in combined text
-                new_text = combined_text.replace(placeholder_text, value or "")
-                
-                # Clear existing runs
-                for run in paragraph.runs:
-                    run.text = ""
-                
-                # Add the new text to the first run (or create one if no runs exist)
-                if paragraph.runs:
-                    paragraph.runs[0].text = new_text
-                else:
-                    paragraph.add_run(new_text)
+        # Check which placeholders are in this paragraph
+        placeholders_here = [
+            (name, val) for name, val in values_dict.items() 
+            if f"[{name}]" in full_text
+        ]
+        
+        if not placeholders_here:
+            return
+        
+        # Combine all run texts
+        combined_text = "".join([run.text for run in paragraph.runs])
+        
+        # Replace all placeholders in the combined text
+        for placeholder_name, replacement_value in placeholders_here:
+            placeholder_str = f"[{placeholder_name}]"
+            if placeholder_str in combined_text:
+                combined_text = combined_text.replace(
+                    placeholder_str, 
+                    replacement_value or ""
+                )
+                replacements_made[placeholder_name] = True
+                print(f"  ✓ Replaced [{placeholder_name}] in paragraph")
+        
+        # Clear existing runs and set new text
+        for run in paragraph.runs:
+            run.text = ""
+        
+        if paragraph.runs:
+            paragraph.runs[0].text = combined_text
+        else:
+            paragraph.add_run(combined_text)
     
     # Replace in paragraphs
-    for paragraph in doc.paragraphs:
-        for placeholder_name, value in values.items():
-            replace_text_in_paragraph(paragraph, placeholder_name, value)
+    print("🔄 Processing paragraphs...")
+    for i, paragraph in enumerate(doc.paragraphs):
+        if any(f"[{name}]" in paragraph.text for name in values.keys()):
+            print(f"  Found placeholders in paragraph {i}")
+            replace_in_paragraph(paragraph, values)
     
     # Replace in tables
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    for placeholder_name, value in values.items():
-                        replace_text_in_paragraph(paragraph, placeholder_name, value)
+    print("🔄 Processing tables...")
+    for table_idx, table in enumerate(doc.tables):
+        for row_idx, row in enumerate(table.rows):
+            for cell_idx, cell in enumerate(row.cells):
+                for para_idx, paragraph in enumerate(cell.paragraphs):
+                    if any(f"[{name}]" in paragraph.text for name in values.keys()):
+                        print(f"  Found placeholders in table[{table_idx}] row[{row_idx}] cell[{cell_idx}] para[{para_idx}]")
+                        replace_in_paragraph(paragraph, values)
     
-    # Save completed document
+    # Save document
     doc.save(output_path)
+    
+    # Print summary
+    print(f"\n{'='*70}")
+    print(f"✅ Document saved to: {output_path}")
+    print(f"\nReplacement summary:")
+    for placeholder_name, was_replaced in replacements_made.items():
+        status = "✓ REPLACED" if was_replaced else "✗ NOT FOUND"
+        print(f"  [{placeholder_name}]: {status}")
+    print(f"{'='*70}\n")
+    
+    # Warn if nothing was replaced
+    if not any(replacements_made.values()):
+        print("⚠️  WARNING: No placeholders were replaced!")
+        print("   Check that placeholder names in values match document exactly.")

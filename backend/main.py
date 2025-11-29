@@ -1,7 +1,7 @@
 # backend/main.py
 """
 FastAPI application for Legal Document Assistant
-OpenAI GPT-4 Mini + Langchain edition
+Fixed version: Properly tracks placeholder filling and handles downloads
 """
 
 import os
@@ -87,33 +87,34 @@ async def upload_document(file: UploadFile = File(...)):
         # Extract text
         document_text = extract_document_text(file_path)
         
-        # Find placeholders
+        # Find placeholders (EXACT NAMES FROM DOCUMENT)
         placeholders = find_placeholders(document_text)
         
-        # Analyze with OpenAI via Langchain
-        analysis = await analyze_placeholders(document_text)
+        # Generate initial message
+        placeholders_str = ", ".join([p["name"] for p in placeholders[:5]])
+        more = f" and {len(placeholders) - 5} more" if len(placeholders) > 5 else ""
         
-        # Merge LLM analysis with regex results
-        for p in placeholders:
-            llm_info = next(
-                (x for x in analysis.get("placeholders", []) 
-                 if x.get("name") == p["name"]),
-                None
-            )
-            if llm_info:
-                p["description"] = llm_info.get("description", p["description"])
-                p["type"] = llm_info.get("type", "text")
+        initial_message = f"""I've loaded your document "{file.filename}". 
+
+I found {len(placeholders)} fields that need to be filled:
+{placeholders_str}{more}
+
+You can provide information for these fields one at a time, or all together. How would you like to proceed?"""
         
-        # Store session
+        # Store session with EXACT placeholder names
         sessions[session_id] = {
             "file_path": file_path,
             "temp_dir": temp_dir,
             "original_filename": file.filename,
             "document_text": document_text,
-            "placeholders": placeholders,
-            "filled_values": {},
+            "placeholders": placeholders,  # EXACT names from document
+            "filled_values": {},  # Will be filled with exact names
             "conversation_history": []
         }
+        
+        print(f"✓ Uploaded document with {len(placeholders)} placeholders:")
+        for p in placeholders:
+            print(f"  - [{p['name']}]")
         
         return UploadResponse(
             session_id=session_id,
@@ -130,10 +131,7 @@ async def chat(request: ChatRequest):
     """
     Handle chat message for filling placeholders
     
-    Args:
-        - session_id: Session identifier from upload
-        - message: User message
-        - placeholders: Current placeholder state
+    FIX: Properly updates placeholders list with exact names
     """
     
     if request.session_id not in sessions:
@@ -142,53 +140,105 @@ async def chat(request: ChatRequest):
     session = sessions[request.session_id]
     
     try:
-        # Get chat response from Langchain/OpenAI
+        # Get chat response from LLM
         result = await chat_for_placeholders(
             request.message,
             session["placeholders"],
             session["conversation_history"]
         )
         
-        # Update filled values with intelligent matching
-        for placeholder_name, value in result.get("filled_values", {}).items():
-            # Try exact match first
-            matched = False
+        # CRITICAL FIX: Update placeholders with exact names from filled_values
+        filled_values = result.get("filled_values", {})
+        
+        print(f"\n📝 Chat response filled_values: {filled_values}")
+        
+        # Update session placeholders AND filled_values with exact names
+        for field_name, value in filled_values.items():
+            # Find the exact placeholder in our list
             for p in session["placeholders"]:
-                if p["name"].lower().strip() == placeholder_name.lower().strip():
-                    session["filled_values"][p["name"]] = value
+                if p["name"].lower() == field_name.lower():
+                    # Update the placeholder object
                     p["filled"] = True
                     p["value"] = value
-                    matched = True
+                    
+                    # Store with EXACT placeholder name
+                    session["filled_values"][p["name"]] = value
+                    
+                    print(f"✓ UPDATED: [{p['name']}] = '{value}'")
                     break
-            
-            # If no exact match, try fuzzy matching (check if placeholder_name is contained in p["name"])
-            if not matched:
-                for p in session["placeholders"]:
-                    if (placeholder_name.lower() in p["name"].lower() or 
-                        p["name"].lower() in placeholder_name.lower()):
-                        print(f"DEBUG: Fuzzy match found! '{p['name']}' <- '{value}'")
-                        session["filled_values"][p["name"]] = value
-                        p["filled"] = True
-                        p["value"] = value
-                        matched = True
-                        break
-            
-            # Store with the LLM's key as well for logging
-            if not matched:
-                print(f"DEBUG: NO MATCH found for '{placeholder_name}'. Available placeholders:")
-                for p in session["placeholders"]:
-                    print(f"  - {p['name']} (filled: {p.get('filled', False)})")
-                session["filled_values"][placeholder_name] = value
+            else:
+                # If no exact match found, try the field name as-is
+                # This shouldn't happen if LLM is working correctly
+                session["filled_values"][field_name] = value
+                print(f"⚠️  No exact match for '{field_name}', storing as-is")
+        
+        # Log filled count
+        filled_count = sum(1 for p in session["placeholders"] if p.get("filled"))
+        total_count = len(session["placeholders"])
+        print(f"📊 Progress: {filled_count}/{total_count} fields filled")
         
         return ChatResponse(
             assistant_message=result.get("assistant_message", ""),
-            filled_values=result.get("filled_values", {}),
-            placeholders=session["placeholders"],
+            filled_values=session["filled_values"],  # Return all filled values
+            placeholders=session["placeholders"],    # Return updated placeholders
             next_question=result.get("next_placeholder")
         )
         
     except Exception as e:
+        print(f"❌ Error in chat: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
+
+
+@app.post("/download")
+async def download_document(request: DownloadRequest):
+    """
+    Generate and download completed document
+    
+    FIX: Uses session["filled_values"] with EXACT placeholder names
+    """
+    
+    session_id = request.session_id
+    
+    if not session_id or session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session expired or invalid")
+    
+    session = sessions[session_id]
+    
+    # Check if all placeholders are filled
+    unfilled = [p for p in session["placeholders"] if not p.get("filled")]
+    if unfilled:
+        unfilled_names = ", ".join([p["name"] for p in unfilled])
+        raise HTTPException(
+            status_code=400,
+            detail=f"Please fill remaining fields: {unfilled_names}"
+        )
+    
+    try:
+        print(f"\n🔄 Downloading document...")
+        print(f"File path: {session['file_path']}")
+        print(f"Filled values: {session['filled_values']}")
+        
+        # Generate completed document
+        output_path = f"{session['temp_dir']}/completed.docx"
+        
+        # CRITICAL: Pass filled_values with EXACT placeholder names
+        fill_placeholders(
+            session["file_path"],
+            session["filled_values"],  # Has exact names as keys
+            output_path
+        )
+        
+        print(f"✓ Document completed: {output_path}")
+        
+        return FileResponse(
+            output_path,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=f"completed_{session['original_filename']}"
+        )
+        
+    except Exception as e:
+        print(f"❌ Download error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
 
 
 @app.get("/debug/{session_id}")
@@ -205,56 +255,9 @@ async def debug_session(session_id: str):
         "filled_values": session["filled_values"],
         "conversation_history_length": len(session["conversation_history"]),
         "filled_count": sum(1 for p in session["placeholders"] if p.get("filled")),
-        "total_count": len(session["placeholders"])
+        "total_count": len(session["placeholders"]),
+        "unfilled_placeholders": [p["name"] for p in session["placeholders"] if not p.get("filled")]
     }
-
-
-@app.post("/download")
-async def download_document(request: DownloadRequest):
-    """
-    Generate and download completed document
-    
-    Checks that all placeholders are filled before generating
-    Expects session_id in request body
-    """
-    
-    # Get session_id from request
-    actual_session_id = request.session_id
-    
-    if not actual_session_id or actual_session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session expired or invalid")
-    
-    session = sessions[actual_session_id]
-    
-    # Check if all placeholders are filled
-    unfilled = [p for p in session["placeholders"] if not p.get("filled")]
-    if unfilled:
-        
-        raise HTTPException(
-            status_code=400,
-            detail=f"Please fill remaining fields: {', '.join(p['name'] for p in unfilled)}"
-        )
-    
-    try:
-        
-        # Generate completed document
-        output_path = f"{session['temp_dir']}/completed.docx"
-        fill_placeholders(
-            session["file_path"],
-            session["filled_values"],
-            output_path
-        )
-        
-        
-        return FileResponse(
-            output_path,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=f"completed_{session['original_filename']}"
-        )
-        
-    except Exception as e:
-       
-        raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
 
 
 @app.get("/status/{session_id}", response_model=StatusResponse)

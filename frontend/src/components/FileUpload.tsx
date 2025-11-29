@@ -34,24 +34,33 @@ export function FileUpload({ onUpload, loading }: FileUploadProps) {
   };
 
   return (
-    <div
-      onDragEnter={handleDrag}
-      onDragLeave={handleDrag}
-      onDragOver={handleDrag}
-      onDrop={handleDrop}
-      className={`file-upload ${dragActive ? "active" : ""}`}
-    >
-      <div className="upload-content">
-        <div className="upload-icon">📄</div>
-        <h2>Upload Your Document</h2>
-        <p>Drag and drop your .docx file here, or click to browse</p>
-        <input
-          type="file"
-          accept=".docx"
-          onChange={handleChange}
-          disabled={loading}
-          className="file-input"
-        />
+    <div className="upload-wrapper">
+      <div
+        onDragEnter={handleDrag}
+        onDragLeave={handleDrag}
+        onDragOver={handleDrag}
+        onDrop={handleDrop}
+        className={`file-upload ${dragActive ? "active" : ""}`}
+      >
+        <div className="upload-content">
+          <div className="upload-icon">📄</div>
+          <h2>Upload Your Document</h2>
+          <p className="upload-subtitle">Drag and drop your .docx file here</p>
+          <div className="divider">or</div>
+          <label className="file-input-label">
+            <input
+              type="file"
+              accept=".docx"
+              onChange={handleChange}
+              disabled={loading}
+              className="file-input"
+            />
+            <span className="file-input-button">
+              {loading ? "Uploading..." : "Browse Files"}
+            </span>
+          </label>
+          <p className="file-hint">Supported format: .docx</p>
+        </div>
       </div>
     </div>
   );
