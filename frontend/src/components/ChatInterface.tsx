@@ -12,7 +12,6 @@ export function ChatInterface({
   conversation,
   onSendMessage,
   loading,
-  placeholders = [],
 }: ChatInterfaceProps) {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
