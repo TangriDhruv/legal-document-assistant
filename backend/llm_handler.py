@@ -1,9 +1,9 @@
 # backend/llm_handler.py
 """
-IMPROVED VERSION: Better placeholder matching and next placeholder prompting
-- Smarter matching using semantic analysis
-- Explicit next placeholder with details
-- Better value extraction
+FIXED VERSION: Better placeholder matching and next placeholder prompting
+- Uses correct field names (next_question instead of next_placeholder)
+- Properly integrates with ChatResponse model
+- Better value extraction for currency and company names
 """
 
 import json
@@ -49,12 +49,6 @@ def calculate_match_score(user_text: str, placeholder: Dict) -> float:
     """
     Calculate match score between user input and placeholder
     Higher score = better match
-    
-    Uses multiple signals:
-    - Exact placeholder name match
-    - Partial name match
-    - Type-specific keywords
-    - Description keywords
     """
     user_text_lower = user_text.lower()
     placeholder_name = placeholder['name'].lower()
@@ -82,6 +76,7 @@ def calculate_match_score(user_text: str, placeholder: Dict) -> float:
                  '2024', '2025', '2023', 'january', 'february', 'january 1', 'dec', 'nov'],
         'person_name': ['name', 'person', 'mr', 'ms', 'john', 'jane', 'smith', 'founder', 'investor'],
         'company_name': ['company', 'corp', 'inc', 'ltd', 'llc', 'organization', 'business', 'group', 'co'],
+        'text': ['title', 'ceo', 'founder', 'partner', 'director', 'officer'],
         'address': ['address', 'street', 'city', 'state', 'zip', 'road', 'ave', 'blvd', '123', 'ny', 'ca'],
         'email': ['email', 'contact', '@', '.com', '.org', '.net'],
         'phone': ['phone', 'number', 'call', 'contact', '(', ')', 'cell', 'mobile'],
@@ -110,12 +105,6 @@ def find_best_placeholder_match(
     """
     Find the best matching placeholder for user input
     Returns (placeholder, confidence_score)
-    
-    Scoring approach:
-    1. Exact field name mention (100 points)
-    2. Field name parts (25 points each)
-    3. Type-specific keywords (15 points each)
-    4. Description keywords (5 points each)
     """
     
     if not unfilled_placeholders:
@@ -149,20 +138,21 @@ def find_best_placeholder_match(
 def find_next_unfilled_placeholder(
     current_placeholder: Dict,
     unfilled_placeholders: List[Dict]
-) -> Optional[Dict]:
+) -> Optional[str]:
     """
-    Find the next unfilled placeholder after current one
+    Find the next unfilled placeholder name after current one
+    Returns the name string or None
     """
     placeholder_names = [p['name'] for p in unfilled_placeholders]
     
     if current_placeholder['name'] not in placeholder_names:
         # Current is filled, return first unfilled
-        return unfilled_placeholders[0] if unfilled_placeholders else None
+        return placeholder_names[0] if placeholder_names else None
     
     current_idx = placeholder_names.index(current_placeholder['name'])
     
     if current_idx < len(unfilled_placeholders) - 1:
-        return unfilled_placeholders[current_idx + 1]
+        return unfilled_placeholders[current_idx + 1]['name']
     
     return None
 
@@ -223,10 +213,11 @@ async def chat_for_placeholders(
     conversation_history: List[Dict]
 ) -> Dict[str, Any]:
     """
-    IMPROVED VERSION:
+    IMPROVED VERSION with CORRECT field names for ChatResponse model
     1. Better matching using semantic scoring
     2. Extract ALL values user provides
     3. Suggest NEXT placeholder with full details
+    4. Returns: assistant_message, filled_values, next_question (not next_placeholder)
     """
     
     debug_log("=" * 80, "INFO")
@@ -239,12 +230,14 @@ async def chat_for_placeholders(
     unfilled = [p for p in placeholders if not p.get("filled")]
     filled = [p for p in placeholders if p.get("filled")]
     
+    debug_log(f"Unfilled: {len(unfilled)}, Filled: {len(filled)}", "DEBUG")
+    
     if not unfilled:
         debug_log("No unfilled placeholders remaining", "WARNING")
         return {
             "assistant_message": "All fields are now filled! Ready to download your document.",
             "filled_values": {},
-            "next_placeholder": None
+            "next_question": None
         }
     
     # SMART MATCHING: Find best placeholder match
@@ -254,7 +247,7 @@ async def chat_for_placeholders(
         return {
             "assistant_message": "I couldn't identify which field you're trying to fill. Please be more specific.",
             "filled_values": {},
-            "next_placeholder": None
+            "next_question": None
         }
     
     matched_placeholder, match_confidence = match_result
@@ -268,10 +261,10 @@ async def chat_for_placeholders(
         for p in filled
     ]) or "None yet"
     
-    # IMPROVED SYSTEM PROMPT: More explicit about value extraction
+    # SYSTEM PROMPT: More explicit about value extraction
     system_prompt = f"""You are a document filling assistant. Your job is to extract values from user input and match them to placeholder fields.
 
-KEY INSTRUCTION: Extract the VALUE and determine which PLACEHOLDER it belongs to, even if user didn't explicitly mention the field name.
+IMPORTANT: Even if user didn't explicitly mention field names, analyze the VALUE and determine which PLACEHOLDER it belongs to.
 
 FILLED FIELDS:
 {filled_str}
@@ -279,33 +272,33 @@ FILLED FIELDS:
 UNFILLED FIELDS:
 {unfilled_str}
 
-CURRENT FOCUS (most likely field being described): "{matched_placeholder['name']}"
+CURRENT FOCUS (most likely field): "{matched_placeholder['name']}"
 Type: {matched_placeholder.get('type', 'text')}
 Description: {matched_placeholder.get('description', 'Field')}
 
-USER MESSAGE: "{message}"
+USER SAID: "{message}"
 
 ═══════════════════════════════════════════════════════════════════════════════
-YOUR TASK:
-1. Extract the value(s) the user provided
+EXTRACTION TASK:
+1. Extract the value(s) user provided
 2. Determine which placeholder field(s) they belong to
-3. Use EXACT placeholder names as keys
-4. Suggest which field to fill NEXT (by name)
+3. Use EXACT field names from UNFILLED FIELDS list
+4. Suggest next field by NAME
 
-CRITICAL JSON FORMAT (no exceptions):
+CRITICAL JSON FORMAT (no exceptions - these exact field names):
 {{
   "assistant_message": "Acknowledge what was provided, then suggest next field",
   "filled_values": {{"Placeholder Name": "exact value from user"}},
-  "next_placeholder": "Name of next unfilled field (or null if all done)"
+  "next_question": "Name of next unfilled field (or null if all done)"
 }}
 
 RULES:
 - Acknowledge what user provided
-- If they filled current field, say "Got it" then ask for NEXT field
-- next_placeholder should be a NAME from UNFILLED FIELDS list
-- If user value could match current focus field, use it
-- Extract values EXACTLY as user stated (don't paraphrase)
-- For next field, include: "Next, please provide: **[Field Name]**"
+- Use EXACT placeholder names as keys in filled_values
+- Extract values EXACTLY as user stated
+- next_question should be a field NAME from UNFILLED FIELDS or null
+- For acknowledgement: "Acknowledged, the [field name] is [value]."
+- Then suggest next: "Next, please provide: [Next Field Name]"
 - ENTIRE response is ONLY JSON
 - No text outside JSON
 - Start with {{ end with }}
@@ -313,13 +306,13 @@ RULES:
 EXAMPLES:
 
 User: "The company is ABC Corporation"
-{{"assistant_message": "Got it, company is ABC Corporation. Next, please provide: **Purchase Amount**", "filled_values": {{"Company Name": "ABC Corporation"}}, "next_placeholder": "Purchase Amount"}}
+{{"assistant_message": "Acknowledged, the Company Name is ABC Corporation. Next, please provide: Purchase Amount", "filled_values": {{"Company Name": "ABC Corporation"}}, "next_question": "Purchase Amount"}}
 
-User: "We paid $5000 for it"
-{{"assistant_message": "Recorded $5000. Next, please provide: **Company Name**", "filled_values": {{"Purchase Amount": "$5000"}}, "next_placeholder": "Company Name"}}
+User: "We paid $500000 for it"
+{{"assistant_message": "Acknowledged, the Purchase Amount is $500000. Next, please provide: Title", "filled_values": {{"Purchase Amount": "$500000"}}, "next_question": "Title"}}
 
 User: "Company ABC and amount $1000"
-{{"assistant_message": "Got it - ABC as company and $1000 as payment. All done!", "filled_values": {{"Company Name": "ABC", "Purchase Amount": "$1000"}}, "next_placeholder": null}}"""
+{{"assistant_message": "Acknowledged. Company Name is ABC and Purchase Amount is $1000. All fields filled!", "filled_values": {{"Company Name": "ABC", "Purchase Amount": "$1000"}}, "next_question": null}}"""
     
     # Add to history
     conversation_history.append({
@@ -354,60 +347,56 @@ User: "Company ABC and amount $1000"
             result = json.loads(json_str)
             debug_log(f"✓ JSON parsed successfully", "SUCCESS")
             
-            # Ensure required fields
+            # Ensure required fields exist
             if "assistant_message" not in result:
                 result["assistant_message"] = "Got it"
             if "filled_values" not in result:
                 result["filled_values"] = {}
-            if "next_placeholder" not in result:
-                result["next_placeholder"] = None
+            if "next_question" not in result:
+                result["next_question"] = None
             
             # Log extracted values
             filled_values = result.get("filled_values", {})
             debug_log(f"Extracted {len(filled_values)} values", "INFO")
             for field_name, value in filled_values.items():
-                debug_log(f"  '{field_name}' → '{value}'", "INFO")
+                debug_log(f"  '{field_name}' = '{value}'", "INFO")
             
-            if result.get("next_placeholder"):
-                debug_log(f"Next placeholder: {result['next_placeholder']}", "INFO")
-            else:
-                debug_log(f"All fields complete", "SUCCESS")
+            next_q = result.get("next_question")
+            debug_log(f"Next question: {next_q if next_q else 'All complete'}", "INFO")
+            
+            # Add response to history
+            conversation_history.append({
+                "role": "assistant",
+                "content": result.get("assistant_message", "")
+            })
             
             return result
         else:
             debug_log(f"❌ No JSON found in response", "ERROR")
-            debug_log(f"Raw response: {response_text[:200]}", "DEBUG")
+            debug_log(f"Raw response: {response_text[:300]}", "DEBUG")
             result = {
                 "assistant_message": response_text[:200],
                 "filled_values": {},
-                "next_placeholder": None
+                "next_question": None
             }
+            return result
             
     except json.JSONDecodeError as e:
         debug_log(f"❌ JSON parse error: {str(e)}", "ERROR")
         result = {
             "assistant_message": "Error processing response",
             "filled_values": {},
-            "next_placeholder": None
+            "next_question": None
         }
+        return result
     except Exception as e:
         debug_log(f"❌ Error: {str(e)}", "ERROR")
         result = {
             "assistant_message": "Error",
             "filled_values": {},
-            "next_placeholder": None
+            "next_question": None
         }
-    finally:
-        # Add response to history
-        if result:
-            conversation_history.append({
-                "role": "assistant",
-                "content": result.get("assistant_message", "")
-            })
-    
-    debug_log(f"Returning result", "SUCCESS")
-    
-    return result if result else {"assistant_message": "Error", "filled_values": {}, "next_placeholder": None}
+        return result
 
 
 def set_model(model_name: str) -> ChatOpenAI:

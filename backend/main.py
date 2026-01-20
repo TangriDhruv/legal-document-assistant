@@ -1,7 +1,8 @@
 # backend/main.py
 """
 FastAPI application for Legal Document Assistant
-UPDATED: Uses context-based placeholder inference
+FIXED: Properly tracks placeholder filling and handles downloads
+FIX: Ensures filled_values correctly updates placeholder state
 """
 
 import os
@@ -14,7 +15,7 @@ from dotenv import load_dotenv
 
 from models import ChatRequest, ChatResponse, UploadResponse, StatusResponse, Placeholder, DownloadRequest
 from document_handler import extract_document_text, find_placeholders, fill_placeholders
-from llm_handler import chat_for_placeholders
+from llm_handler import analyze_placeholders, chat_for_placeholders
 from config import settings
 
 # Load environment variables
@@ -24,7 +25,7 @@ load_dotenv()
 app = FastAPI(
     title="Legal Document Assistant",
     description="Upload documents and fill placeholders with AI assistance",
-    version="2.0.0"
+    version="1.0.0"
 )
 
 # Enable CORS
@@ -46,8 +47,7 @@ async def health_check():
     return {
         "status": "ok",
         "model": settings.openai_model,
-        "service": "Legal Document Assistant",
-        "version": "2.0.0"
+        "service": "Legal Document Assistant"
     }
 
 
@@ -55,12 +55,11 @@ async def health_check():
 async def upload_document(file: UploadFile = File(...)):
     """
     Upload and parse a .docx file
-    UPDATED: Uses context-based type inference
     
     Returns:
         - session_id: Unique session identifier
         - filename: Uploaded filename
-        - placeholders: List of detected placeholders with inferred types
+        - placeholders: List of detected placeholders
     """
     
     # Validate file type
@@ -89,16 +88,11 @@ async def upload_document(file: UploadFile = File(...)):
         # Extract text
         document_text = extract_document_text(file_path)
         
-        # Find placeholders WITH context inference
-        placeholders = find_placeholders(document_text, use_inference=True)
+        # Find placeholders (EXACT NAMES FROM DOCUMENT)
+        placeholders = find_placeholders(document_text)
         
-        # Generate initial message with inferred names
-        placeholders_display = []
-        for p in placeholders[:5]:
-            inferred = p.get("inferred_name", p["name"])
-            placeholders_display.append(inferred)
-        
-        placeholders_str = ", ".join(placeholders_display)
+        # Generate initial message
+        placeholders_str = ", ".join([p["name"] for p in placeholders[:5]])
         more = f" and {len(placeholders) - 5} more" if len(placeholders) > 5 else ""
         
         initial_message = f"""I've loaded your document "{file.filename}". 
@@ -108,21 +102,20 @@ I found {len(placeholders)} fields that need to be filled:
 
 You can provide information for these fields one at a time, or all together. How would you like to proceed?"""
         
-        # Store session
+        # Store session with EXACT placeholder names
         sessions[session_id] = {
             "file_path": file_path,
             "temp_dir": temp_dir,
             "original_filename": file.filename,
             "document_text": document_text,
-            "placeholders": placeholders,
-            "filled_values": {},
+            "placeholders": placeholders,  # EXACT names from document
+            "filled_values": {},  # Will be filled with exact names
             "conversation_history": []
         }
         
-        print(f"✓ Uploaded document with {len(placeholders)} placeholders:")
+        print(f"\n✓ Uploaded document with {len(placeholders)} placeholders:")
         for p in placeholders:
-            inferred = p.get("inferred_name", p["name"])
-            print(f"  - [{p['name']}] → {inferred} (type: {p.get('type')})")
+            print(f"  - [{p['name']}]")
         
         return UploadResponse(
             session_id=session_id,
@@ -138,7 +131,8 @@ You can provide information for these fields one at a time, or all together. How
 async def chat(request: ChatRequest):
     """
     Handle chat message for filling placeholders
-    UPDATED: Uses inferred types for better matching
+    
+    FIXED: Properly updates placeholders with filled values
     """
     
     if request.session_id not in sessions:
@@ -154,37 +148,65 @@ async def chat(request: ChatRequest):
             session["conversation_history"]
         )
         
-        # Update placeholders with filled values
+        # CRITICAL FIX: Extract and apply filled_values
         filled_values = result.get("filled_values", {})
         
-        print(f"\n📝 Chat response filled_values: {filled_values}")
+        print(f"\n{'='*70}")
+        print(f"📝 Chat result from LLM:")
+        print(f"Assistant message: {result.get('assistant_message', '')[:100]}...")
+        print(f"Filled values: {filled_values}")
+        print(f"{'='*70}\n")
         
-        # Update session placeholders with exact names
-        for field_name, value in filled_values.items():
-            for p in session["placeholders"]:
-                if p["name"] == field_name:
-                    p["filled"] = True
-                    p["value"] = value
-                    session["filled_values"][field_name] = value
-                    
-                    inferred = p.get("inferred_name", field_name)
-                    print(f"✓ UPDATED: [{field_name}] ({inferred}) = '{value}'")
-                    break
+        # Update session placeholders AND filled_values with exact names
+        if filled_values:
+            for field_name, value in filled_values.items():
+                print(f"🔍 Processing filled value: '{field_name}' = '{value}'")
+                
+                # Find the exact placeholder in our list (case-insensitive match)
+                found = False
+                for p in session["placeholders"]:
+                    # IMPORTANT: Case-insensitive comparison for matching
+                    if p["name"].lower() == field_name.lower():
+                        # Update the placeholder object
+                        print(f"  ✓ Found exact placeholder: {p['name']}")
+                        p["filled"] = True
+                        p["value"] = str(value)  # Ensure string
+                        
+                        # Store with EXACT placeholder name (as it appears in document)
+                        session["filled_values"][p["name"]] = str(value)
+                        
+                        print(f"  ✓ UPDATED: [{p['name']}] = '{value}'")
+                        found = True
+                        break
+                
+                if not found:
+                    # If no exact match found, store with provided name anyway
+                    print(f"  ⚠️  No exact match for '{field_name}', storing as-is")
+                    session["filled_values"][field_name] = str(value)
         
-        # Log progress
+        # Log current progress
         filled_count = sum(1 for p in session["placeholders"] if p.get("filled"))
         total_count = len(session["placeholders"])
         print(f"📊 Progress: {filled_count}/{total_count} fields filled")
         
+        # Print all current values for debugging
+        print(f"\n📋 Current placeholder states:")
+        for p in session["placeholders"]:
+            status = "✓ FILLED" if p.get("filled") else "⏳ UNFILLED"
+            value = f" = '{p.get('value')}'" if p.get("value") else ""
+            print(f"  [{p['name']}] {status}{value}")
+        
         return ChatResponse(
             assistant_message=result.get("assistant_message", ""),
-            filled_values=session["filled_values"],
-            placeholders=session["placeholders"],
+            filled_values=session["filled_values"],  # Return all filled values
+            placeholders=session["placeholders"],    # Return updated placeholders
             next_question=result.get("next_placeholder")
         )
         
     except Exception as e:
         print(f"❌ Error in chat: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 
@@ -192,6 +214,8 @@ async def chat(request: ChatRequest):
 async def download_document(request: DownloadRequest):
     """
     Generate and download completed document
+    
+    Uses session["filled_values"] with EXACT placeholder names
     """
     
     session_id = request.session_id
@@ -204,7 +228,7 @@ async def download_document(request: DownloadRequest):
     # Check if all placeholders are filled
     unfilled = [p for p in session["placeholders"] if not p.get("filled")]
     if unfilled:
-        unfilled_names = ", ".join([p.get("inferred_name", p["name"]) for p in unfilled])
+        unfilled_names = ", ".join([p["name"] for p in unfilled])
         raise HTTPException(
             status_code=400,
             detail=f"Please fill remaining fields: {unfilled_names}"
@@ -218,9 +242,10 @@ async def download_document(request: DownloadRequest):
         # Generate completed document
         output_path = f"{session['temp_dir']}/completed.docx"
         
+        # CRITICAL: Pass filled_values with EXACT placeholder names
         fill_placeholders(
             session["file_path"],
-            session["filled_values"],
+            session["filled_values"],  # Has exact names as keys
             output_path
         )
         
@@ -234,6 +259,8 @@ async def download_document(request: DownloadRequest):
         
     except Exception as e:
         print(f"❌ Download error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
 
 
@@ -252,13 +279,15 @@ async def debug_session(session_id: str):
         "conversation_history_length": len(session["conversation_history"]),
         "filled_count": sum(1 for p in session["placeholders"] if p.get("filled")),
         "total_count": len(session["placeholders"]),
-        "unfilled_placeholders": [
+        "unfilled_placeholders": [p["name"] for p in session["placeholders"] if not p.get("filled")],
+        "placeholder_states": [
             {
                 "name": p["name"],
-                "inferred_name": p.get("inferred_name"),
-                "type": p.get("type")
+                "filled": p.get("filled", False),
+                "value": p.get("value"),
+                "type": p.get("type"),
             }
-            for p in session["placeholders"] if not p.get("filled")
+            for p in session["placeholders"]
         ]
     }
 
