@@ -1,9 +1,9 @@
 # backend/llm_handler.py
 """
-FIXED VERSION: Better placeholder matching and next placeholder prompting
-- Uses correct field names (next_question instead of next_placeholder)
-- Properly integrates with ChatResponse model
-- Better value extraction for currency and company names
+COMPLETE VERSION: Better placeholder matching with type inference
+- Infers placeholder types from context
+- Uses semantic scoring with type information
+- Better value extraction
 """
 
 import json
@@ -26,6 +26,7 @@ def debug_log(message: str, level: str = "INFO"):
         "ERROR": "❌ ",
         "DEBUG": "🔍 ",
         "MATCH": "🎯 ",
+        "INFER": "🔎 ",
     }
     prefix = levels.get(level, "→ ")
     print(f"{prefix} [LLM_HANDLER] {message}")
@@ -45,15 +46,74 @@ llm = ChatOpenAI(
 debug_log("ChatOpenAI initialized with temperature=0", "SUCCESS")
 
 
+async def infer_placeholder_type(
+    placeholder_name: str,
+    context: str
+) -> str:
+    """
+    Use LLM to infer the type of a placeholder based on its name and context
+    
+    Returns one of: text, currency, date, person_name, company_name, address, email, phone
+    """
+    
+    debug_log(f"Inferring type for [{placeholder_name}]", "INFER")
+    
+    try:
+        system_prompt = """You are an expert at analyzing document placeholders. 
+Infer the data type of a placeholder based on its name and surrounding context.
+
+Return ONLY ONE of these types:
+- text (generic text field)
+- currency (money amounts, prices, fees)
+- date (dates, time periods)
+- person_name (individual names)
+- company_name (organization names)
+- address (physical addresses)
+- email (email addresses)
+- phone (phone numbers)
+
+Respond with ONLY the type name, nothing else."""
+        
+        user_message = f"""Placeholder name: {placeholder_name}
+Context: {context}
+
+What type is this placeholder?"""
+        
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_message)
+        ])
+        
+        inferred_type = response.content.strip().lower()
+        
+        # Validate against allowed types
+        allowed_types = ["text", "currency", "date", "person_name", "company_name", "address", "email", "phone"]
+        if inferred_type not in allowed_types:
+            inferred_type = "text"  # Default to text if invalid
+        
+        debug_log(f"Inferred type for [{placeholder_name}]: {inferred_type}", "INFER")
+        return inferred_type
+        
+    except Exception as e:
+        debug_log(f"Error inferring type: {str(e)}, defaulting to 'text'", "WARNING")
+        return "text"
+
+
 def calculate_match_score(user_text: str, placeholder: Dict) -> float:
     """
     Calculate match score between user input and placeholder
     Higher score = better match
+    
+    Uses:
+    - Exact field name match
+    - Partial name match
+    - Type-specific keywords
+    - Description keywords
     """
     user_text_lower = user_text.lower()
     placeholder_name = placeholder['name'].lower()
     placeholder_desc = placeholder.get('description', '').lower()
-    placeholder_type = placeholder.get('type', '').lower()
+    placeholder_type = placeholder.get('type', 'text').lower()
     
     score = 0.0
     
@@ -71,18 +131,18 @@ def calculate_match_score(user_text: str, placeholder: Dict) -> float:
     
     # === Type-specific keyword matching ===
     type_keywords = {
-        'currency': ['dollar', 'amount', '$', 'cost', 'price', 'fee', 'payment', 'paid', 'invest'],
-        'date': ['date', 'when', 'day', 'month', 'year', '/', '-', 'january', 'february', 'march',
-                 '2024', '2025', '2023', 'january', 'february', 'january 1', 'dec', 'nov'],
-        'person_name': ['name', 'person', 'mr', 'ms', 'john', 'jane', 'smith', 'founder', 'investor'],
-        'company_name': ['company', 'corp', 'inc', 'ltd', 'llc', 'organization', 'business', 'group', 'co'],
-        'text': ['title', 'ceo', 'founder', 'partner', 'director', 'officer'],
-        'address': ['address', 'street', 'city', 'state', 'zip', 'road', 'ave', 'blvd', '123', 'ny', 'ca'],
-        'email': ['email', 'contact', '@', '.com', '.org', '.net'],
-        'phone': ['phone', 'number', 'call', 'contact', '(', ')', 'cell', 'mobile'],
+        'currency': ['dollar', 'amount', '$', 'cost', 'price', 'fee', 'payment', 'paid', 'invest', 'usd', 'thousand', 'million'],
+        'date': ['date', 'when', 'day', 'month', 'year', '/', '-', 'january', 'february', 'march', 
+                 '2024', '2025', '2023', 'dec', 'nov', 'oct', 'sep'],
+        'person_name': ['name', 'person', 'mr', 'ms', 'john', 'jane', 'smith', 'founder', 'investor', 'ceo', 'officer'],
+        'company_name': ['company', 'corp', 'inc', 'ltd', 'llc', 'organization', 'business', 'group', 'co', 'enterprise'],
+        'text': ['title', 'ceo', 'founder', 'partner', 'director', 'officer', 'role', 'position'],
+        'address': ['address', 'street', 'city', 'state', 'zip', 'road', 'ave', 'blvd', 'lane', 'drive'],
+        'email': ['email', 'contact', '@', '.com', '.org', '.net', 'mail'],
+        'phone': ['phone', 'number', 'call', 'contact', '(', ')', 'cell', 'mobile', 'tel'],
     }
     
-    if placeholder_type and placeholder_type in type_keywords:
+    if placeholder_type in type_keywords:
         for keyword in type_keywords[placeholder_type]:
             if keyword in user_text_lower:
                 score += 15
@@ -105,6 +165,8 @@ def find_best_placeholder_match(
     """
     Find the best matching placeholder for user input
     Returns (placeholder, confidence_score)
+    
+    Uses semantic scoring based on name, type, and context
     """
     
     if not unfilled_placeholders:
@@ -135,30 +197,8 @@ def find_best_placeholder_match(
     return (placeholder, confidence)
 
 
-def find_next_unfilled_placeholder(
-    current_placeholder: Dict,
-    unfilled_placeholders: List[Dict]
-) -> Optional[str]:
-    """
-    Find the next unfilled placeholder name after current one
-    Returns the name string or None
-    """
-    placeholder_names = [p['name'] for p in unfilled_placeholders]
-    
-    if current_placeholder['name'] not in placeholder_names:
-        # Current is filled, return first unfilled
-        return placeholder_names[0] if placeholder_names else None
-    
-    current_idx = placeholder_names.index(current_placeholder['name'])
-    
-    if current_idx < len(unfilled_placeholders) - 1:
-        return unfilled_placeholders[current_idx + 1]['name']
-    
-    return None
-
-
 async def analyze_placeholders(document_text: str) -> Dict[str, Any]:
-    """Use OpenAI to analyze and describe placeholders"""
+    """Use OpenAI to analyze and describe placeholders with type inference"""
     
     debug_log("ANALYZE_PLACEHOLDERS CALLED", "INFO")
     
@@ -179,6 +219,7 @@ Your response must be ONLY valid JSON (no exceptions):
 Rules:
 - Use EXACT placeholder names from document
 - Provide helpful, specific descriptions
+- Infer accurate types based on name and context
 - ENTIRE response is JSON only
 - Start with { end with }"""
         
@@ -198,7 +239,7 @@ Rules:
         if json_start != -1 and json_end > json_start:
             json_str = response_text[json_start:json_end]
             result = json.loads(json_str)
-            debug_log(f"✓ Placeholders analyzed", "SUCCESS")
+            debug_log(f"✓ Placeholders analyzed with types inferred", "SUCCESS")
             return result
         
     except Exception as e:
@@ -213,11 +254,11 @@ async def chat_for_placeholders(
     conversation_history: List[Dict]
 ) -> Dict[str, Any]:
     """
-    IMPROVED VERSION with CORRECT field names for ChatResponse model
-    1. Better matching using semantic scoring
-    2. Extract ALL values user provides
-    3. Suggest NEXT placeholder with full details
-    4. Returns: assistant_message, filled_values, next_question (not next_placeholder)
+    IMPROVED VERSION with TYPE INFERENCE:
+    1. Uses inferred placeholder types for better matching
+    2. Better matching using semantic scoring
+    3. Extract ALL values user provides
+    4. Suggest NEXT placeholder with full details
     """
     
     debug_log("=" * 80, "INFO")
@@ -240,7 +281,7 @@ async def chat_for_placeholders(
             "next_question": None
         }
     
-    # SMART MATCHING: Find best placeholder match
+    # SMART MATCHING: Find best placeholder match (uses type information)
     match_result = find_best_placeholder_match(message, unfilled)
     
     if not match_result:
@@ -252,7 +293,7 @@ async def chat_for_placeholders(
     
     matched_placeholder, match_confidence = match_result
     
-    # Build unfilled list for prompt
+    # Build unfilled list for prompt (include type info)
     unfilled_str = "\n".join([f'"{p["name"]}" (Type: {p.get("type", "text")})' for p in unfilled])
     
     # Build filled list
@@ -269,11 +310,11 @@ IMPORTANT: Even if user didn't explicitly mention field names, analyze the VALUE
 FILLED FIELDS:
 {filled_str}
 
-UNFILLED FIELDS:
+UNFILLED FIELDS (with inferred types):
 {unfilled_str}
 
 CURRENT FOCUS (most likely field): "{matched_placeholder['name']}"
-Type: {matched_placeholder.get('type', 'text')}
+Inferred Type: {matched_placeholder.get('type', 'text')}
 Description: {matched_placeholder.get('description', 'Field')}
 
 USER SAID: "{message}"
@@ -295,7 +336,7 @@ CRITICAL JSON FORMAT (no exceptions - these exact field names):
 RULES:
 - Acknowledge what user provided
 - Use EXACT placeholder names as keys in filled_values
-- Extract values EXACTLY as user stated
+- Extract values EXACTLY as user stated (preserve formatting like $ for currency)
 - next_question should be a field NAME from UNFILLED FIELDS or null
 - For acknowledgement: "Acknowledged, the [field name] is [value]."
 - Then suggest next: "Next, please provide: [Next Field Name]"
@@ -329,7 +370,7 @@ User: "Company ABC and amount $1000"
         else:
             messages.append(AIMessage(content=msg["content"]))
     
-    debug_log(f"Calling LLM with matched placeholder: {matched_placeholder['name']}", "INFO")
+    debug_log(f"Calling LLM with matched placeholder: {matched_placeholder['name']} (type: {matched_placeholder.get('type')})", "INFO")
     
     result = None
     try:

@@ -1,19 +1,72 @@
 # backend/document_handler.py
 """
-UPDATED: Added context-based type inference for placeholders
 Document processing module using python-docx
+IMPROVED: Keeps type inference, no circular dependencies
 """
 
 import re
 from typing import List, Dict
 from docx import Document
-from llm_handler import infer_placeholder_type
+from docx.shared import RGBColor, Pt
+from docx.enum.text import WD_COLOR_INDEX
 
-DEBUG = True
 
-def debug_log(msg: str):
-    if DEBUG:
-        print(f"📄 [DOCUMENT_HANDLER] {msg}")
+def infer_placeholder_type(placeholder_name: str, context: str) -> str:
+    """
+    Infer placeholder type from name and context
+    Returns: text, currency, date, person_name, company_name, address, email, phone
+    
+    No LLM calls - uses keyword matching on context
+    """
+    
+    combined_text = (placeholder_name + " " + context).lower()
+    
+    # Type-specific keyword patterns
+    type_patterns = {
+        'currency': [
+            'amount', 'price', 'cost', 'fee', 'payment', 'paid', 'invest', 'purchase',
+            'dollar', 'salary', 'sum', 'total', 'value', 'rate', '$', 'thousand'
+        ],
+        'date': [
+            'date', 'when', 'day', 'month', 'year', 'time', 'period', 'until', 'from',
+            'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+            'september', 'october', 'november', 'december', '20', '2024', '2025'
+        ],
+        'person_name': [
+            'investor', 'founder', 'director', 'officer', 'partner', 'representative',
+            'mr', 'ms', 'dr', 'attorney', 'signatory', 'member', 'person', "person's"
+        ],
+        'company_name': [
+            'company', 'corporation', 'corp', 'inc', 'llc', 'ltd', 'lp', 'entity',
+            'organization', 'business', 'firm', 'group', 'enterprise', 'venture'
+        ],
+        'address': [
+            'address', 'street', 'city', 'state', 'zip', 'zipcode', 'road', 'avenue',
+            'boulevard', 'drive', 'lane', 'location', 'place', 'building'
+        ],
+        'email': [
+            'email', 'mail', 'contact', '@', '.com', '.org', '.net', '.edu'
+        ],
+        'phone': [
+            'phone', 'number', 'telephone', 'mobile', 'cell', 'contact', '(', ')'
+        ]
+    }
+    
+    # Count keyword matches for each type
+    type_scores = {type_name: 0 for type_name in type_patterns.keys()}
+    
+    for type_name, keywords in type_patterns.items():
+        for keyword in keywords:
+            if keyword in combined_text:
+                type_scores[type_name] += 1
+    
+    # Get type with highest score
+    if max(type_scores.values()) > 0:
+        best_type = max(type_scores, key=type_scores.get)
+        return best_type
+    
+    # Default to text if no keywords matched
+    return 'text'
 
 
 def extract_document_text(docx_path: str) -> str:
@@ -24,7 +77,7 @@ def extract_document_text(docx_path: str) -> str:
         docx_path: Path to .docx file
         
     Returns:
-        Plain text from all paragraphs and tables
+        Plain text from all paragraphs
     """
     doc = Document(docx_path)
     text_parts = []
@@ -44,77 +97,74 @@ def extract_document_text(docx_path: str) -> str:
     return "\n".join(text_parts)
 
 
-def find_placeholders(text: str, use_inference: bool = True) -> List[Dict]:
+def find_placeholders(text: str) -> List[Dict]:
     """
     Find all [Bracketed] placeholders in document text
-    UPDATED: Use context-based inference to determine field types
+    Infers type from context using keyword analysis
     
     Args:
         text: Document text to search
-        use_inference: If True, use LLM to infer types from context
         
     Returns:
-        List of placeholder dictionaries with name, type, description, etc.
+        List of placeholder dictionaries with name, context, type, etc.
     """
+    # Pattern to match [text] or [text with spaces]
     pattern = r'\[([^\]]+)\]'
     matches = re.finditer(pattern, text)
     
     placeholders = []
     seen = set()
     
-    debug_log(f"Finding placeholders with inference={'ON' if use_inference else 'OFF'}")
-    
     for match in matches:
         placeholder_name = match.group(1).strip()
         
-        # Skip duplicates
-        if placeholder_name in seen:
+        # Skip empty brackets
+        if not placeholder_name:
             continue
-        seen.add(placeholder_name)
+        
+        # Skip duplicates (case-insensitive)
+        placeholder_name_lower = placeholder_name.lower()
+        if placeholder_name_lower in seen:
+            print(f"⏭️ Skipping duplicate placeholder: [{placeholder_name}]")
+            continue
+        seen.add(placeholder_name_lower)
         
         start, end = match.span()
         
-        # Extract context (150 chars before and after for better inference)
+        # Extract context (150 chars before and after for type inference)
         context_start = max(0, start - 150)
         context_end = min(len(text), end + 150)
+        context = text[context_start:context_end].strip()
         
-        before_text = text[context_start:start]
-        after_text = text[end:context_end]
-        full_context = text[context_start:context_end].strip()
+        # INFER TYPE from context using keyword matching
+        inferred_type = infer_placeholder_type(placeholder_name, context)
         
-        # Base placeholder object
-        placeholder = {
-            "name": placeholder_name,
-            "context": full_context,
-            "before": before_text.strip(),
-            "after": after_text.strip(),
-            "filled": False,
-            "value": None,
+        # Generate description based on inferred type
+        type_descriptions = {
+            'currency': 'Amount in dollars/currency',
+            'date': 'Date (e.g., MM/DD/YYYY or text format)',
+            'person_name': 'Person\'s full name',
+            'company_name': 'Company or organization name',
+            'address': 'Full address',
+            'email': 'Email address',
+            'phone': 'Phone number',
+            'text': 'Text value'
         }
         
-        # NEW: Infer type from context if enabled
-        if use_inference:
-            debug_log(f"Inferring type for [{placeholder_name}]...")
-            inferred = infer_placeholder_type(
-                placeholder_name,
-                before_text,
-                after_text,
-                full_context
-            )
-            placeholder.update(inferred)
-            debug_log(f"  → {inferred.get('inferred_name')} (type: {inferred.get('type')})")
-        else:
-            # Basic fallback
-            placeholder.update({
-                "type": "text",
-                "description": f"Please provide: {placeholder_name.lower()}",
-                "inferred_name": placeholder_name,
-                "inference_confidence": 0.0
-            })
+        description = type_descriptions.get(inferred_type, f'Please provide: {placeholder_name.lower()}')
         
-        placeholders.append(placeholder)
+        placeholder_dict = {
+            "name": placeholder_name,  # EXACT name as it appears in document
+            "context": context,
+            "filled": False,
+            "value": None,
+            "type": inferred_type,  # INFERRED from context
+            "description": description
+        }
+        
+        placeholders.append(placeholder_dict)
+        print(f"✓ Found placeholder: [{placeholder_name}] (Type: {inferred_type})")
     
-    debug_log(f"Found {len(placeholders)} placeholders")
     return placeholders
 
 
