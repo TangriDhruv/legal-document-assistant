@@ -1,14 +1,19 @@
 # backend/document_handler.py
 """
+UPDATED: Added context-based type inference for placeholders
 Document processing module using python-docx
-FIXED: Properly replaces placeholders while preserving formatting
 """
 
 import re
 from typing import List, Dict
 from docx import Document
-from docx.shared import RGBColor, Pt
-from docx.enum.text import WD_COLOR_INDEX
+from llm_handler import infer_placeholder_type
+
+DEBUG = True
+
+def debug_log(msg: str):
+    if DEBUG:
+        print(f"📄 [DOCUMENT_HANDLER] {msg}")
 
 
 def extract_document_text(docx_path: str) -> str:
@@ -19,7 +24,7 @@ def extract_document_text(docx_path: str) -> str:
         docx_path: Path to .docx file
         
     Returns:
-        Plain text from all paragraphs
+        Plain text from all paragraphs and tables
     """
     doc = Document(docx_path)
     text_parts = []
@@ -39,21 +44,25 @@ def extract_document_text(docx_path: str) -> str:
     return "\n".join(text_parts)
 
 
-def find_placeholders(text: str) -> List[Dict]:
+def find_placeholders(text: str, use_inference: bool = True) -> List[Dict]:
     """
     Find all [Bracketed] placeholders in document text
+    UPDATED: Use context-based inference to determine field types
     
     Args:
         text: Document text to search
+        use_inference: If True, use LLM to infer types from context
         
     Returns:
-        List of placeholder dictionaries with name, context, etc.
+        List of placeholder dictionaries with name, type, description, etc.
     """
     pattern = r'\[([^\]]+)\]'
     matches = re.finditer(pattern, text)
     
     placeholders = []
     seen = set()
+    
+    debug_log(f"Finding placeholders with inference={'ON' if use_inference else 'OFF'}")
     
     for match in matches:
         placeholder_name = match.group(1).strip()
@@ -65,20 +74,47 @@ def find_placeholders(text: str) -> List[Dict]:
         
         start, end = match.span()
         
-        # Extract context (100 chars before and after)
-        context_start = max(0, start - 100)
-        context_end = min(len(text), end + 100)
-        context = text[context_start:context_end].strip()
+        # Extract context (150 chars before and after for better inference)
+        context_start = max(0, start - 150)
+        context_end = min(len(text), end + 150)
         
-        placeholders.append({
+        before_text = text[context_start:start]
+        after_text = text[end:context_end]
+        full_context = text[context_start:context_end].strip()
+        
+        # Base placeholder object
+        placeholder = {
             "name": placeholder_name,
-            "context": context,
+            "context": full_context,
+            "before": before_text.strip(),
+            "after": after_text.strip(),
             "filled": False,
             "value": None,
-            "type": "text",
-            "description": f"Please provide: {placeholder_name.lower()}"
-        })
+        }
+        
+        # NEW: Infer type from context if enabled
+        if use_inference:
+            debug_log(f"Inferring type for [{placeholder_name}]...")
+            inferred = infer_placeholder_type(
+                placeholder_name,
+                before_text,
+                after_text,
+                full_context
+            )
+            placeholder.update(inferred)
+            debug_log(f"  → {inferred.get('inferred_name')} (type: {inferred.get('type')})")
+        else:
+            # Basic fallback
+            placeholder.update({
+                "type": "text",
+                "description": f"Please provide: {placeholder_name.lower()}",
+                "inferred_name": placeholder_name,
+                "inference_confidence": 0.0
+            })
+        
+        placeholders.append(placeholder)
     
+    debug_log(f"Found {len(placeholders)} placeholders")
     return placeholders
 
 
@@ -90,8 +126,6 @@ def fill_placeholders(
     """
     Replace [Placeholder] with actual values in .docx
     Preserves original formatting
-    
-    FIXED VERSION: Properly handles placeholder replacement
     
     Args:
         docx_path: Path to original .docx

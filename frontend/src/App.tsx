@@ -72,7 +72,12 @@ function App() {
                       <ul className="field-list">
                         {placeholders.filter((p) => p.filled).map((p) => (
                           <li key={p.name} className="field-item filled">
-                            <div className="field-item-name">{p.name}</div>
+                            <div className="field-item-name">
+                              {p.inferred_name || p.name}
+                            </div>
+                            <div className="field-item-type">
+                              {p.type && <small>Type: {p.type}</small>}
+                            </div>
                             <div className="field-item-value">{p.value}</div>
                           </li>
                         ))}
@@ -87,7 +92,20 @@ function App() {
                       <ul className="field-list">
                         {placeholders.filter((p) => !p.filled).map((p) => (
                           <li key={p.name} className="field-item">
-                            <div className="field-item-name">{p.name}</div>
+                            <div className="field-item-name">
+                              {p.inferred_name || p.name}
+                              {p.inferred_name && p.inferred_name !== p.name && (
+                                <span className="inferred-badge">inferred</span>
+                              )}
+                            </div>
+                            {p.type && (
+                              <div className="field-item-type">Type: {p.type}</div>
+                            )}
+                            {p.inference_confidence !== undefined && (
+                              <div className="field-confidence">
+                                Confidence: {Math.round(p.inference_confidence * 100)}%
+                              </div>
+                            )}
                             {p.description && (
                               <div className="field-item-desc">{p.description}</div>
                             )}
