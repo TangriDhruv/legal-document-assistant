@@ -1,13 +1,14 @@
 # backend/llm_handler.py
 """
-UPDATED: Added context-based type inference for placeholders
-- Uses surrounding text to infer what each placeholder should be
-- Matches user input to correct field even with poor placeholder names
+IMPROVED VERSION: Better placeholder matching and next placeholder prompting
+- Smarter matching using semantic analysis
+- Explicit next placeholder with details
+- Better value extraction
 """
 
 import json
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage, AIMessage
 from config import settings
@@ -24,18 +25,13 @@ def debug_log(message: str, level: str = "INFO"):
         "WARNING": "⚠️ ",
         "ERROR": "❌ ",
         "DEBUG": "🔍 ",
-        "LLM_CALL": "🤖 ",
-        "LLM_RESPONSE": "💬 ",
-        "JSON_PARSE": "📋 ",
-        "EXTRACTION": "🎯 ",
         "MATCH": "🎯 ",
-        "INFERENCE": "🧠 "
     }
     prefix = levels.get(level, "→ ")
     print(f"{prefix} [LLM_HANDLER] {message}")
 
 
-# Initialize with ultra-low temperature
+# Initialize LLM
 llm = ChatOpenAI(
     model_name=settings.openai_model,
     temperature=0,
@@ -46,55 +42,157 @@ llm = ChatOpenAI(
     presence_penalty=2.0
 )
 
-debug_log("ChatOpenAI initialized with temperature=0, top_p=0.1", "SUCCESS")
+debug_log("ChatOpenAI initialized with temperature=0", "SUCCESS")
 
 
-def infer_placeholder_type(
-    placeholder_name: str,
-    before_text: str,
-    after_text: str,
-    full_context: str
-) -> Dict[str, Any]:
+def calculate_match_score(user_text: str, placeholder: Dict) -> float:
     """
-    NEW: Use LLM to infer what type of field this is
-    based on surrounding context
+    Calculate match score between user input and placeholder
+    Higher score = better match
     
-    Examples:
-      "dated [FIELD1]" → type: date
-      "amount [XXX]" → type: currency
-      "between [A] and [B]" → type: person_name
+    Uses multiple signals:
+    - Exact placeholder name match
+    - Partial name match
+    - Type-specific keywords
+    - Description keywords
+    """
+    user_text_lower = user_text.lower()
+    placeholder_name = placeholder['name'].lower()
+    placeholder_desc = placeholder.get('description', '').lower()
+    placeholder_type = placeholder.get('type', '').lower()
+    
+    score = 0.0
+    
+    # === HIGHEST PRIORITY: Exact field name match ===
+    if placeholder_name in user_text_lower:
+        score += 100
+        debug_log(f"  {placeholder['name']}: +100 (exact name match)", "DEBUG")
+    
+    # === Name part matches ===
+    name_parts = placeholder_name.split()
+    for part in name_parts:
+        if len(part) > 2 and part in user_text_lower:
+            score += 25
+            debug_log(f"  {placeholder['name']}: +25 (name part '{part}' matched)", "DEBUG")
+    
+    # === Type-specific keyword matching ===
+    type_keywords = {
+        'currency': ['dollar', 'amount', '$', 'cost', 'price', 'fee', 'payment', 'paid', 'invest'],
+        'date': ['date', 'when', 'day', 'month', 'year', '/', '-', 'january', 'february', 'march',
+                 '2024', '2025', '2023', 'january', 'february', 'january 1', 'dec', 'nov'],
+        'person_name': ['name', 'person', 'mr', 'ms', 'john', 'jane', 'smith', 'founder', 'investor'],
+        'company_name': ['company', 'corp', 'inc', 'ltd', 'llc', 'organization', 'business', 'group', 'co'],
+        'address': ['address', 'street', 'city', 'state', 'zip', 'road', 'ave', 'blvd', '123', 'ny', 'ca'],
+        'email': ['email', 'contact', '@', '.com', '.org', '.net'],
+        'phone': ['phone', 'number', 'call', 'contact', '(', ')', 'cell', 'mobile'],
+    }
+    
+    if placeholder_type and placeholder_type in type_keywords:
+        for keyword in type_keywords[placeholder_type]:
+            if keyword in user_text_lower:
+                score += 15
+                debug_log(f"  {placeholder['name']}: +15 (keyword '{keyword}' for type {placeholder_type})", "DEBUG")
+    
+    # === Description keyword matching ===
+    desc_words = [w for w in placeholder_desc.split() if len(w) > 3]
+    for word in desc_words:
+        if word in user_text_lower:
+            score += 5
+            debug_log(f"  {placeholder['name']}: +5 (description word '{word}')", "DEBUG")
+    
+    return score
+
+
+def find_best_placeholder_match(
+    user_input: str,
+    unfilled_placeholders: List[Dict]
+) -> Optional[Tuple[Dict, float]]:
+    """
+    Find the best matching placeholder for user input
+    Returns (placeholder, confidence_score)
+    
+    Scoring approach:
+    1. Exact field name mention (100 points)
+    2. Field name parts (25 points each)
+    3. Type-specific keywords (15 points each)
+    4. Description keywords (5 points each)
     """
     
-    debug_log(f"Inferring type for placeholder: [{placeholder_name}]", "INFERENCE")
+    if not unfilled_placeholders:
+        return None
     
-    system_prompt = """You are a document analysis expert. Analyze the context around a placeholder and infer what type of information should go there.
+    # Single unfilled? Return it
+    if len(unfilled_placeholders) == 1:
+        debug_log(f"Only one unfilled: {unfilled_placeholders[0]['name']}", "MATCH")
+        return (unfilled_placeholders[0], 1.0)
+    
+    # Calculate scores for all placeholders
+    debug_log(f"Scoring {len(unfilled_placeholders)} placeholders for input: '{user_input}'", "DEBUG")
+    
+    scores = {}
+    for placeholder in unfilled_placeholders:
+        score = calculate_match_score(user_input, placeholder)
+        scores[placeholder['name']] = (placeholder, score)
+        debug_log(f"  {placeholder['name']}: {score:.0f} points", "DEBUG")
+    
+    # Find best match
+    best_match = max(scores.values(), key=lambda x: x[1])
+    
+    placeholder, score = best_match
+    confidence = min(score / 100, 1.0)  # Normalize to 0-1
+    
+    debug_log(f"Best match: {placeholder['name']} (confidence: {confidence:.2f})", "MATCH")
+    
+    return (placeholder, confidence)
 
-Based on surrounding text, determine:
-1. Field type (date, currency, person_name, company_name, address, email, phone, number, text, other)
-2. Inferred descriptive name for this field
-3. A helpful description for the user
 
-You MUST respond with ONLY valid JSON (no other text):
-{
-  "type": "date|currency|person_name|company_name|address|email|phone|number|text|other",
-  "inferred_name": "Clear, descriptive name for this field",
-  "description": "What information is needed here?",
-  "confidence": 0.95,
-  "reasoning": "Why you inferred this type"
-}"""
+def find_next_unfilled_placeholder(
+    current_placeholder: Dict,
+    unfilled_placeholders: List[Dict]
+) -> Optional[Dict]:
+    """
+    Find the next unfilled placeholder after current one
+    """
+    placeholder_names = [p['name'] for p in unfilled_placeholders]
+    
+    if current_placeholder['name'] not in placeholder_names:
+        # Current is filled, return first unfilled
+        return unfilled_placeholders[0] if unfilled_placeholders else None
+    
+    current_idx = placeholder_names.index(current_placeholder['name'])
+    
+    if current_idx < len(unfilled_placeholders) - 1:
+        return unfilled_placeholders[current_idx + 1]
+    
+    return None
 
-    user_message = f"""Analyze this placeholder in context:
 
-Before: ...{before_text}
-Placeholder: [{placeholder_name}]
-After: {after_text}...
-
-Full context: ...{full_context}...
-
-What type of field is this? Infer from context clues."""
-
+async def analyze_placeholders(document_text: str) -> Dict[str, Any]:
+    """Use OpenAI to analyze and describe placeholders"""
+    
+    debug_log("ANALYZE_PLACEHOLDERS CALLED", "INFO")
+    
     try:
-        debug_log(f"Sending to LLM for type inference...", "LLM_CALL")
+        system_prompt = """You are a legal document expert. Analyze [bracketed placeholders] and provide helpful descriptions.
+
+Your response must be ONLY valid JSON (no exceptions):
+{
+  "placeholders": [
+    {
+      "name": "placeholder_name_without_brackets",
+      "type": "text|currency|date|person_name|company_name|address|email|phone",
+      "description": "What information is needed here?"
+    }
+  ]
+}
+
+Rules:
+- Use EXACT placeholder names from document
+- Provide helpful, specific descriptions
+- ENTIRE response is JSON only
+- Start with { end with }"""
+        
+        user_message = f"Analyze these placeholders:\n\n{document_text[:2000]}"
         
         response = llm.invoke([
             SystemMessage(content=system_prompt),
@@ -102,7 +200,6 @@ What type of field is this? Infer from context clues."""
         ])
         
         response_text = response.content
-        debug_log(f"LLM inference response: {len(response_text)} chars", "LLM_RESPONSE")
         
         # Extract JSON
         json_start = response_text.find('{')
@@ -111,112 +208,13 @@ What type of field is this? Infer from context clues."""
         if json_start != -1 and json_end > json_start:
             json_str = response_text[json_start:json_end]
             result = json.loads(json_str)
-            
-            debug_log(f"✓ Inferred: {result.get('inferred_name', placeholder_name)} (type: {result.get('type')})", "SUCCESS")
-            
-            return {
-                "type": result.get("type", "text"),
-                "inferred_name": result.get("inferred_name", placeholder_name),
-                "description": result.get("description", f"Please provide: {placeholder_name.lower()}"),
-                "inference_confidence": result.get("confidence", 0.8),
-                "reasoning": result.get("reasoning", "")
-            }
-        
-    except json.JSONDecodeError as e:
-        debug_log(f"❌ JSON parse error in inference: {str(e)}", "ERROR")
-    except Exception as e:
-        debug_log(f"❌ Inference error: {str(e)}", "ERROR")
-    
-    # Fallback
-    debug_log(f"⚠️  Using fallback for [{placeholder_name}]", "WARNING")
-    return {
-        "type": "text",
-        "inferred_name": placeholder_name,
-        "description": f"Please provide: {placeholder_name.lower()}",
-        "inference_confidence": 0.0,
-        "reasoning": "Inference failed, using basic description"
-    }
-
-
-def find_matching_placeholder(
-    user_input: str,
-    unfilled_placeholders: List[Dict],
-    context_from_doc: str = ""
-) -> Optional[Dict]:
-    """
-    UPDATED: Use both placeholder name AND inferred type for matching
-    
-    Examples:
-      User: "The company is XYZ"
-      Unfilled: [
-        {name: "FIELD1", inferred_name: "Company Name", type: "company_name"},
-        {name: "FIELD2", inferred_name: "Date", type: "date"}
-      ]
-      Returns: FIELD1 (matched by type and meaning)
-      
-      User: "January 15, 2025"
-      Returns: FIELD2 (matched by date type)
-    """
-    
-    if not unfilled_placeholders:
-        return None
-    
-    # Single unfilled placeholder? Probably that one
-    if len(unfilled_placeholders) == 1:
-        debug_log(f"Only one unfilled: {unfilled_placeholders[0].get('inferred_name', unfilled_placeholders[0]['name'])}", "MATCH")
-        return unfilled_placeholders[0]
-    
-    # Multiple placeholders - use LLM to match
-    placeholders_list = "\n".join([
-        f"- \"{p.get('inferred_name', p['name'])}\" "
-        f"(Type: {p.get('type', 'text')}, "
-        f"Original: [{p['name']}]): "
-        f"{p.get('description', 'Field')}"
-        for p in unfilled_placeholders
-    ])
-    
-    system_prompt = f"""You are a field matcher. Given user input, identify which placeholder field they're describing.
-Match using:
-1. Field TYPE (date, currency, person_name, etc.)
-2. Meaning of the user's input
-3. Context clues
-
-Available unfilled fields:
-{placeholders_list}
-
-User input: "{user_input}"
-
-Respond with ONLY the inferred field name (not original name) in quotes.
-Example responses:
-"Company Name"
-"Agreement Date"
-"Investment Amount"
-"""
-    
-    try:
-        debug_log(f"LLM matching input to placeholder (using types)...", "MATCH")
-        
-        response = llm.invoke([
-            SystemMessage(content=system_prompt)
-        ])
-        
-        matched_name = response.content.strip().strip('"').strip()
-        debug_log(f"LLM matched to: {matched_name}", "MATCH")
-        
-        # Find by inferred_name first, then by name
-        for p in unfilled_placeholders:
-            inferred = p.get('inferred_name', p['name'])
-            if inferred.lower() == matched_name.lower() or p['name'].lower() == matched_name.lower():
-                debug_log(f"✓ Verified match: {p['name']} ({inferred})", "MATCH")
-                return p
-        
-        # If no exact match, return best guess (first unfilled)
-        debug_log(f"⚠️ No exact match found, using first unfilled", "WARNING")
-        return unfilled_placeholders[0]
+            debug_log(f"✓ Placeholders analyzed", "SUCCESS")
+            return result
         
     except Exception as e:
-        debug_log(f"Matching error: {str(e)}, using first unfilled", "WARNING")
-        return unfilled_placeholders[0]
+        debug_log(f"Error analyzing placeholders: {str(e)}", "ERROR")
+    
+    return {"placeholders": []}
 
 
 async def chat_for_placeholders(
@@ -225,18 +223,15 @@ async def chat_for_placeholders(
     conversation_history: List[Dict]
 ) -> Dict[str, Any]:
     """
-    UPDATED: Use inferred types in matching
-    
-    Process:
-    1. Identify which placeholder user is talking about (using types)
-    2. Send THAT exact placeholder name to LLM
-    3. Get value filled
-    4. Update with actual placeholder name from document
+    IMPROVED VERSION:
+    1. Better matching using semantic scoring
+    2. Extract ALL values user provides
+    3. Suggest NEXT placeholder with full details
     """
     
-    debug_log("=" * 80, "LLM_CALL")
-    debug_log("CHAT_FOR_PLACEHOLDERS CALLED", "LLM_CALL")
-    debug_log("=" * 80, "LLM_CALL")
+    debug_log("=" * 80, "INFO")
+    debug_log("CHAT_FOR_PLACEHOLDERS CALLED", "INFO")
+    debug_log("=" * 80, "INFO")
     
     debug_log(f"User message: '{message}'", "DEBUG")
     
@@ -244,33 +239,39 @@ async def chat_for_placeholders(
     unfilled = [p for p in placeholders if not p.get("filled")]
     filled = [p for p in placeholders if p.get("filled")]
     
-    # Smart matching using inferred types
-    matched_placeholder = find_matching_placeholder(message, unfilled)
-    
-    if not matched_placeholder:
+    if not unfilled:
         debug_log("No unfilled placeholders remaining", "WARNING")
         return {
-            "assistant_message": "All fields are filled!",
+            "assistant_message": "All fields are now filled! Ready to download your document.",
             "filled_values": {},
             "next_placeholder": None
         }
     
+    # SMART MATCHING: Find best placeholder match
+    match_result = find_best_placeholder_match(message, unfilled)
+    
+    if not match_result:
+        return {
+            "assistant_message": "I couldn't identify which field you're trying to fill. Please be more specific.",
+            "filled_values": {},
+            "next_placeholder": None
+        }
+    
+    matched_placeholder, match_confidence = match_result
+    
+    # Build unfilled list for prompt
+    unfilled_str = "\n".join([f'"{p["name"]}" (Type: {p.get("type", "text")})' for p in unfilled])
+    
     # Build filled list
     filled_str = "\n".join([
-        f'"{p.get("inferred_name", p["name"])}" = "{p.get("value", "")}"'
+        f'"{p["name"]}" = "{p.get("value", "")}"'
         for p in filled
-    ]) or "None"
+    ]) or "None yet"
     
-    # Use inferred names in prompts for clarity
-    unfilled_str = "\n".join([
-        f'"{p.get("inferred_name", p["name"])}" (Type: {p.get("type", "text")})'
-        for p in unfilled
-    ])
-    
-    matched_display_name = matched_placeholder.get("inferred_name", matched_placeholder["name"])
-    matched_original_name = matched_placeholder["name"]
-    
-    system_prompt = f"""You are a document filling assistant. Extract values from user input and assign to the exact placeholder names provided.
+    # IMPROVED SYSTEM PROMPT: More explicit about value extraction
+    system_prompt = f"""You are a document filling assistant. Your job is to extract values from user input and match them to placeholder fields.
+
+KEY INSTRUCTION: Extract the VALUE and determine which PLACEHOLDER it belongs to, even if user didn't explicitly mention the field name.
 
 FILLED FIELDS:
 {filled_str}
@@ -278,39 +279,47 @@ FILLED FIELDS:
 UNFILLED FIELDS:
 {unfilled_str}
 
-Current focus: "{matched_display_name}"
-Type: {matched_placeholder.get("type", "text")}
-Description: {matched_placeholder.get("description", "Field")}
-Original placeholder name: [{matched_original_name}]
+CURRENT FOCUS (most likely field being described): "{matched_placeholder['name']}"
+Type: {matched_placeholder.get('type', 'text')}
+Description: {matched_placeholder.get('description', 'Field')}
 
-USER SAID: "{message}"
+USER MESSAGE: "{message}"
 
 ═══════════════════════════════════════════════════════════════════════════════
-TASK:
-1. Extract the value user provided for "{matched_display_name}"
-2. Return it with the EXACT original placeholder name: [{matched_original_name}]
-3. Respond with ONLY valid JSON
+YOUR TASK:
+1. Extract the value(s) the user provided
+2. Determine which placeholder field(s) they belong to
+3. Use EXACT placeholder names as keys
+4. Suggest which field to fill NEXT (by name)
 
-MANDATORY JSON FORMAT:
+CRITICAL JSON FORMAT (no exceptions):
 {{
-  "assistant_message": "Brief acknowledgment",
-  "filled_values": {{"{matched_original_name}": "value_extracted"}},
-  "next_placeholder": null
+  "assistant_message": "Acknowledge what was provided, then suggest next field",
+  "filled_values": {{"Placeholder Name": "exact value from user"}},
+  "next_placeholder": "Name of next unfilled field (or null if all done)"
 }}
 
-CRITICAL RULES:
-- Use the EXACT placeholder name: "{matched_original_name}"
-- If they provided a value, include it
-- If no value provided, use empty: "filled_values": {{}}
-- Your ENTIRE response is JSON only
+RULES:
+- Acknowledge what user provided
+- If they filled current field, say "Got it" then ask for NEXT field
+- next_placeholder should be a NAME from UNFILLED FIELDS list
+- If user value could match current focus field, use it
+- Extract values EXACTLY as user stated (don't paraphrase)
+- For next field, include: "Next, please provide: **[Field Name]**"
+- ENTIRE response is ONLY JSON
+- No text outside JSON
 - Start with {{ end with }}
 
 EXAMPLES:
-User: "Company Name is ABC Corp"
-{{"assistant_message": "Got it, company is ABC Corp.", "filled_values": {{"{matched_original_name}": "ABC Corp"}}, "next_placeholder": null}}
 
-User: "What's next?"
-{{"assistant_message": "Please provide the value for {matched_display_name}", "filled_values": {{}}, "next_placeholder": null}}"""
+User: "The company is ABC Corporation"
+{{"assistant_message": "Got it, company is ABC Corporation. Next, please provide: **Purchase Amount**", "filled_values": {{"Company Name": "ABC Corporation"}}, "next_placeholder": "Purchase Amount"}}
+
+User: "We paid $5000 for it"
+{{"assistant_message": "Recorded $5000. Next, please provide: **Company Name**", "filled_values": {{"Purchase Amount": "$5000"}}, "next_placeholder": "Company Name"}}
+
+User: "Company ABC and amount $1000"
+{{"assistant_message": "Got it - ABC as company and $1000 as payment. All done!", "filled_values": {{"Company Name": "ABC", "Purchase Amount": "$1000"}}, "next_placeholder": null}}"""
     
     # Add to history
     conversation_history.append({
@@ -327,14 +336,14 @@ User: "What's next?"
         else:
             messages.append(AIMessage(content=msg["content"]))
     
-    debug_log(f"Calling LLM with matched placeholder: {matched_original_name} ({matched_display_name})", "LLM_CALL")
+    debug_log(f"Calling LLM with matched placeholder: {matched_placeholder['name']}", "INFO")
     
+    result = None
     try:
         response = llm.invoke(messages)
         response_text = response.content
         
-        debug_log(f"LLM response: {len(response_text)} chars", "LLM_RESPONSE")
-        debug_log(f"\nFULL RESPONSE:\n{response_text}\n", "LLM_RESPONSE")
+        debug_log(f"LLM response: {len(response_text)} chars", "DEBUG")
         
         # Extract JSON
         json_start = response_text.find('{')
@@ -345,7 +354,7 @@ User: "What's next?"
             result = json.loads(json_str)
             debug_log(f"✓ JSON parsed successfully", "SUCCESS")
             
-            # Ensure required fields exist
+            # Ensure required fields
             if "assistant_message" not in result:
                 result["assistant_message"] = "Got it"
             if "filled_values" not in result:
@@ -355,11 +364,19 @@ User: "What's next?"
             
             # Log extracted values
             filled_values = result.get("filled_values", {})
-            debug_log(f"Extracted {len(filled_values)} values", "EXTRACTION")
+            debug_log(f"Extracted {len(filled_values)} values", "INFO")
             for field_name, value in filled_values.items():
-                debug_log(f"  '{field_name}' → '{value}'", "EXTRACTION")
+                debug_log(f"  '{field_name}' → '{value}'", "INFO")
+            
+            if result.get("next_placeholder"):
+                debug_log(f"Next placeholder: {result['next_placeholder']}", "INFO")
+            else:
+                debug_log(f"All fields complete", "SUCCESS")
+            
+            return result
         else:
             debug_log(f"❌ No JSON found in response", "ERROR")
+            debug_log(f"Raw response: {response_text[:200]}", "DEBUG")
             result = {
                 "assistant_message": response_text[:200],
                 "filled_values": {},
@@ -380,16 +397,17 @@ User: "What's next?"
             "filled_values": {},
             "next_placeholder": None
         }
-    
-    # Add to history
-    conversation_history.append({
-        "role": "assistant",
-        "content": result.get("assistant_message", "")
-    })
+    finally:
+        # Add response to history
+        if result:
+            conversation_history.append({
+                "role": "assistant",
+                "content": result.get("assistant_message", "")
+            })
     
     debug_log(f"Returning result", "SUCCESS")
     
-    return result
+    return result if result else {"assistant_message": "Error", "filled_values": {}, "next_placeholder": None}
 
 
 def set_model(model_name: str) -> ChatOpenAI:
